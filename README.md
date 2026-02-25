@@ -1,39 +1,64 @@
-# GaLore
+# GaLore (Fork) — Offline Benchmark + Diagnostics
 
-> Fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) with an **offline local benchmark**, **memory diagnostics**, and **tests** to study GaLore on a laptop (CPU/MPS/CUDA).
+This fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) adds a **self-contained, offline** way to study GaLore locally: a reproducible benchmark script, memory accounting utilities, and minimal tests.
 
-## Additions in this fork
+## What’s included
 
-- **Offline benchmark runner:** `scripts/local_benchmark.py` (synthetic tokens + tiny LLaMA config; compares AdamW vs GaLoreAdamW across ranks).
-- **Memory diagnostics utilities:** `galore_torch/diagnostics.py` (model param bytes, optimizer-state bytes, GaLore projector bytes).
-- **Minimal tests:** `tests/test_diagnostics.py` (built-in `unittest`; verifies GaLore state < AdamW and projector memory > 0).
-- **Optional deps are import-safe:** `bitsandbytes` / `tensorly` are no longer required just to `import galore_torch` (only needed for 8-bit or tensor projection features).
+- **Offline benchmark runner:** `scripts/local_benchmark.py`
+  - Builds a tiny LLaMA from a local config (default: `configs/llama_9m.json`)
+  - Trains on **synthetic tokens** (no downloads)
+  - Compares **AdamW** vs **GaLoreAdamW** across a rank sweep (default ranks: `8 16 32 64`)
+  - Writes a Markdown report + JSON results
+- **Diagnostics utilities:** `galore_torch/diagnostics.py`
+  - `model_param_nbytes(model)`
+  - `optimizer_state_tensor_nbytes(optimizer)`
+  - `galore_projector_nbytes(optimizer)`
+- **Tests:** `tests/test_diagnostics.py` (built-in `unittest`)
 
-## Quickstart: run the offline benchmark (no internet)
+## Quickstart (no internet)
 
-The benchmark does **not** download datasets or models. It builds a tiny LLaMA from a local config and trains on synthetic tokens.
+Install minimal dependencies for the benchmark:
 
 ```bash
-# minimal deps for the benchmark
 python3 -m pip install torch transformers
+```
 
+Run the benchmark (uses MPS if available, otherwise CPU):
+
+```bash
 python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
 ```
 
-Outputs are written to `reports/runs/<timestamp>/report.md` (plus `results.json` and `run_config.json`).
-See `README_LOCAL_BENCHMARK.md` for details on metrics, interpretation, and suggested runs.
+Outputs:
 
-## Example result (short CPU run)
+- `reports/runs/<timestamp>/report.md`
+- `reports/runs/<timestamp>/results.json`
+- `reports/runs/<timestamp>/run_config.json`
 
-Below is an example from a short run (`--batch_size 2 --seq_len 32 --warmup_steps 1 --steps 2`), showing the expected trend: **lower rank → smaller optimizer state**.
+## Benchmark options (most useful flags)
 
-| method | rank | target_modules | avg_step_ms | opt_state_MB | projector_MB |
-|---|---:|---|---:|---:|---:|
-| adamw | - | - | 25.235 | 68.634 | - |
-| galore_adamw | 8 | attn,mlp | 23.500 | 62.892 | 0.109 |
-| galore_adamw | 16 | attn,mlp | 23.930 | 63.274 | 0.219 |
-| galore_adamw | 32 | attn,mlp | 22.257 | 64.040 | 0.438 |
-| galore_adamw | 64 | attn,mlp | 23.140 | 65.571 | 0.875 |
+```bash
+# smaller/faster run
+python3 scripts/local_benchmark.py --device cpu --batch_size 2 --seq_len 64 --warmup_steps 2 --steps 10 --ranks 8 16
+
+# change which Linear layers get GaLore (substring match on module name)
+python3 scripts/local_benchmark.py --target_modules attn,mlp
+
+# change projection hyperparams
+python3 scripts/local_benchmark.py --update_proj_gap 10 --galore_scale 1.0 --proj_type std
+```
+
+## What the report measures
+
+Per run (baseline AdamW + each GaLore rank), the benchmark records:
+
+- Timing: `avg_step_time_ms`, `p50_step_time_ms`, `p90_step_time_ms`
+- Throughput: `tokens_per_sec`
+- Memory:
+  - `optimizer_state_mb` (tensor storage inside `optimizer.state`)
+  - `galore_projector_mb` (tensor storage under `projector.ortho_matrix`, GaLore only)
+  - Peak device memory (MPS/CUDA) + optional CPU RSS (if `psutil` is installed)
+- Loss: `avg_loss`, `final_loss`
 
 ## Tests
 
@@ -41,175 +66,14 @@ Below is an example from a short run (`--batch_size 2 --seq_len 32 --warmup_step
 python3 -m unittest -q
 ```
 
-This repo contains the pre-release version of GaLore algorithm, proposed by [GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507).
+## Optional dependencies
 
-Gradient Low-Rank Projection (GaLore) is a memory-efficient low-rank training strategy that allows *full-parameter* learning but is more *memory-efficient* than common low-rank adaptation methods, such as LoRA.
-As a gradient projection method, GaLore is independent of the choice of optimizers and can be easily plugged into existing ones with only two lines of code, as shown in Algorithm 1 below.
+These are **not required** for the offline benchmark:
 
-<div align="center">
-  <img src="imgs/galore_code_box.png" alt="Image 2" style="width: 550px; margin: 0 auto;">
-</div>
+- `bitsandbytes`: only needed for `GaLoreAdamW8bit`
+- `tensorly`: only needed for tensor projection (`GaLoreProjectorTensor`, i.e., dim > 2)
 
-## News
+## Attribution
 
-
-- **2024-09-01**: We are working on GaLore 2, which is a more efficient and accessible version of GaLore. Please stay tuned!
-- **2024-07-11**: We release Q-GaLore: Quantized GaLore with INT4 Projection. [[paper](https://arxiv.org/abs/2407.08296)] [[code](https://github.com/VITA-Group/Q-GaLore)]
-
-- **2024-07-01**: GaLore is accepted to ICML 2024 as Oral! 
-
-- **2024-04-20**: Please join our Slack workspace [GaLore-Social](https://join.slack.com/t/galore-social/shared_invite/zt-2ev152px0-DguuQ5WRTLQjtq2C88HBvQ) to discuss with us and the community.
-
-## Installation
-
-### Install GaLore optimizer
-Install from pip:
-```bash 
-pip install galore-torch
-```
-
-or if you want to install from source:
-
-```bash
-git clone git@github.com:jiaweizzhao/GaLore.git
-cd GaLore
-pip install -e .
-```
-
-### Install experiment dependencies
-
-```bash
-pip install -r exp_requirements.txt
-```
-
-Our experiment scripts are tested on Python 3.8 with PyTorch 2.1.
-
-## Usage
-
-### Save optimizer memory using GaLore optimizers
-
-```python
-from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
-# define param groups as galore_params and non_galore_params
-param_groups = [{'params': non_galore_params}, 
-                {'params': galore_params, 'rank': 128, 'update_proj_gap': 200, 'scale': 0.25, 'proj_type': 'std'}]
-optimizer = GaLoreAdamW(param_groups, lr=0.01)
-```
-### Save weight gradient memory using per-layer weight updates
-
-We use `register_post_accumulate_grad_hook` provided by [PyTorch](https://pytorch.org/tutorials/intermediate/optimizer_step_in_backward_tutorial.html) (`torch>=2.1.0`) to enable per-layer weight updates. An example is shown below:
-
-```python
-# define an optimizer for each parameter p, and store them in optimizer_dict
-for p in model.parameters():
-    if p.requires_grad:
-        optimizer_dict[p] = GaLoreAdamW([{'params': p, 'rank': 128, 'update_proj_gap': 200, 'scale': 0.25, 'proj_type': 'std'}], lr=0.01)
-
-# define a hook function to update the parameter p during the backward pass
-def optimizer_hook(p):
-    if p.grad is None: 
-        return
-    optimizer_dict[p].step()
-    optimizer_dict[p].zero_grad()
-
-# Register the hook onto every parameter
-for p in model.parameters():
-    if p.requires_grad:
-        p.register_post_accumulate_grad_hook(optimizer_hook)
-```
-More details can be found in [torchrun_main.py](https://github.com/jiaweizzhao/GaLore/blob/a6bc1650984b1c090a4e108d7c0e3109ee7ad844/torchrun_main.py#L334).
-
-### Local benchmark (MPS/CPU)
-
-This repo includes an **offline**, laptop-friendly benchmark that compares baseline AdamW vs GaLoreAdamW on a tiny LLaMA-9M config using **synthetic tokens** (no dataset downloads).
-
-- On Apple Silicon, install a PyTorch build with **MPS** enabled; `--device auto` will use MPS when available and fall back to CPU otherwise.
-
-```bash
-python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
-```
-
-Outputs are written to `reports/runs/<timestamp>/report.md` along with `results.json` and `run_config.json`.
-See `README_LOCAL_BENCHMARK.md` for details on metrics, interpretation, and suggested runs.
-
-## Benchmark 1: Pre-Training LLaMA on C4 dataset
-`torchrun_main.py` is the main script for training LLaMA models on C4 with GaLore. Our benchmark scripts for various sizes of models are in `scripts/benchmark_c4` folder.
-For example, to train a 60m model on C4, do the following:
-
-```bash
-# LLaMA-60M, GaLore-Adam, 1 A100, 1 Node
-torchrun --standalone --nproc_per_node 1 torchrun_main.py \
-    --model_config configs/llama_60m.json \
-    --lr 0.01 \
-    --galore_scale 0.25 \
-    --rank 128 \
-    --update_proj_gap 200 \
-    --batch_size 256 \
-    --total_batch_size 512 \
-    --num_training_steps 10000 \
-    --warmup_steps 1000 \
-    --weight_decay 0 \
-    --dtype bfloat16 \
-    --eval_every 1000 \
-    --optimizer galore_adamw 
-```
-
-### Train 7B model with a single GPU with 24GB memory
-To train a 7B model with a single GPU such as NVIDIA RTX 4090, all you need to do is to specify `--optimizer=galore_adamw8bit_per_layer`, which enables `GaLoreAdamW8bit` with per-layer weight updates.
-With activation checkpointing, you can maintain a batch size of 16 tested on NVIDIA RTX 4090.
-
-```bash
-# LLaMA-7B, 8-bit GaLore-Adam, single GPU, activation checkpointing
-# bsz=16, 22.8G, 
-torchrun --standalone --nproc_per_node 1 torchrun_main.py \
-    --model_config configs/llama_7b.json \
-    --lr 0.005 \
-    --galore_scale 0.25 \
-    --rank 1024 \
-    --update_proj_gap 500 \
-    --batch_size 16 \
-    --total_batch_size 512 \
-    --activation_checkpointing \
-    --num_training_steps 150000 \
-    --warmup_steps 15000 \
-    --weight_decay 0 \
-    --grad_clipping 1.0 \
-    --dtype bfloat16 \
-    --eval_every 1000 \
-    --single_gpu \
-    --optimizer galore_adamw8bit_per_layer
-```
-
-Currently per-layer weight updates technique is only supported for single GPU training (`--single_gpu`) without using `nn.parallel.DistributedDataParallel`. We are working on supporting multi-GPU training with per-layer weight updates.
-
-## Benchmark 2: Fine-Tuning RoBERTa on GLUE tasks
-`run_glue.py` is the main script for fine-tuning RoBERTa models on GLUE tasks with GaLore. An example script is shown below:
-
-```bash
-python run_glue.py \
-    --model_name_or_path roberta-base \
-    --task_name mrpc \
-    --enable_galore \
-    --lora_all_modules \
-    --max_length 512 \
-    --seed=1234 \
-    --lora_r 4 \
-    --galore_scale 4 \
-    --per_device_train_batch_size 16 \
-    --update_proj_gap 500 \
-    --learning_rate 3e-5 \
-    --num_train_epochs 30 \
-    --output_dir results/ft/roberta_base/mrpc
-```
-
-## Citation
-```bibtex
-@misc{zhao2024galore,
-      title={GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection}, 
-      author={Jiawei Zhao and Zhenyu Zhang and Beidi Chen and Zhangyang Wang and Anima Anandkumar and Yuandong Tian},
-      year={2024},
-      eprint={2403.03507},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG}
-}
-```
+- Original project: [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore)
+- Paper: [GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507)
