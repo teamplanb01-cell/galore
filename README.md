@@ -1,88 +1,61 @@
-# GaLore (Fork): Offline Benchmark + Projector Improvements
+# GaLore (fork): offline benchmark suite and projector improvements
 
-This repo is a fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore). This fork focuses on two things:
+This repository is a fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore). The fork has two goals:
 
-1. **Make GaLore easy to run and measure locally (offline)** on CPU / Apple Silicon MPS / CUDA.
-2. **Improve the GaLore projector** with a configurable SVD method (full vs randomized/low‑rank).
+1. Provide a **fully offline, reproducible** benchmark to quantify GaLore’s memory/throughput trade-offs on CPU/MPS/CUDA.
+2. Introduce a **projector implementation improvement** by making the SVD backend explicit (full vs randomized/low-rank).
 
----
+## Introduction
 
-## Intro (what is GaLore?)
+AdamW maintains first- and second-moment estimates for each parameter tensor. For large models, optimizer state can be a substantial component of training memory. GaLore mitigates this by projecting gradients for selected parameters into a rank-`r` subspace, maintaining AdamW moments in that subspace, and projecting the update back to the original parameter shape. The rank `r` is the primary control knob governing memory reduction and projection overhead.
 
-When you train with **Adam/AdamW**, the optimizer stores extra tensors for each weight (moving averages like `exp_avg` and `exp_avg_sq`). For large models, that optimizer “state” can be a big part of training memory.
+## Gap addressed
 
-**GaLore** reduces optimizer-state memory for selected layers by:
+In the upstream codebase, it is non-trivial to evaluate GaLore locally in a controlled manner because typical workflows depend on external assets (datasets and/or pretrained weights) and do not standardize:
 
-- projecting a layer’s gradient into a **low-rank** space (rank = 8/16/32/64…),
-- storing Adam’s moments **in that smaller space**,
-- projecting the update back to the original shape.
+- how optimizer-state memory is measured,
+- how timing is reported across devices,
+- how runs are documented for reproducibility.
 
-The usual tradeoff:
-- **Lower optimizer-state memory** (especially at small ranks),
-- **Extra compute** to update/maintain the projector.
+## Method (changes and additions)
 
----
+### Offline benchmark harness
 
-## Gap (what was missing / hard in upstream)
+- Runner: `scripts/local_benchmark.py`
+- Model: tiny LLaMA instantiated from `configs/llama_9m.json` via `AutoModelForCausalLM.from_config` (no downloads).
+- Data: deterministic “repeat-biased” synthetic token batches generated from a fixed seed (offline).
+- Comparison: `torch.optim.AdamW` vs `GaLoreAdamW` over a rank sweep (default: 8/16/32/64) with identical initialized weights.
+- Protocol: warm-up steps excluded from timing; multiple trials reported as mean ± standard deviation; device synchronization used for accurate timing (`torch.mps.synchronize()` / `torch.cuda.synchronize()`).
+- Artifacts (per run directory): `report.md`, `results.json`, `run_config.json`.
 
-Upstream GaLore is research code and assumes you already have a full training setup. On a local laptop, it’s hard to:
+### Diagnostics utilities
 
-- run a **fully offline** comparison (no dataset/model downloads),
-- get a **reproducible report** (numbers + settings + versions),
-- measure optimizer-state memory in a consistent way,
-- experiment with projector update cost (SVD) and device handling safely.
-
----
-
-## Method (what we added/changed)
-
-### 1) Offline local benchmark runner
-
-- **CLI:** `scripts/local_benchmark.py`
-- **Tiny model config:** `configs/llama_9m.json` (≈ 9M params, built locally from config; no downloads)
-- **Data:** deterministic “repeat-biased” synthetic token batches (offline, but structured enough for loss to move)
-- **Comparison:** baseline `torch.optim.AdamW` vs `GaLoreAdamW` over a **rank sweep** (default: 8/16/32/64)
-- **Metrics captured:**
-  - speed: `avg_step_ms` (mean ± std over trials), `tokens/s`
-  - optimizer memory: `optimizer_state_mb` (tensor bytes inside `optimizer.state`)
-  - GaLore projector memory: `projector_mb` (tensor bytes under `projector.ortho_matrix`)
-  - device memory: `peak_mps_MB` (or CUDA peak if on CUDA)
-  - sanity: `avg_loss`
-- **Outputs:** `report.md`, `results.json`, `run_config.json` under `reports/runs/<timestamp>/` or `reports/published/<timestamp>/`
-
-### 2) Diagnostics helpers
-
-- **Library:** `galore_torch/diagnostics.py`
-- Adds reusable functions to measure:
+- Library: `galore_torch/diagnostics.py`
+- Implements reusable measurements for:
   - model parameter bytes,
-  - optimizer state tensor bytes (recursive),
-  - GaLore projector tensor bytes.
+  - optimizer state tensor bytes (recursive traversal of `optimizer.state`),
+  - GaLore projector tensor bytes (tensors reachable from `projector.ortho_matrix`).
 
-### 3) GaLore projector improvement (real optimizer-side change)
+### Projector improvement (GaLore-side code change)
 
-- **Implementation:** `galore_torch/galore_projector.py`
-- Adds `svd_method`:
-  - `full` (default): `torch.linalg.svd`
-  - `randomized`: `torch.svd_lowrank` (with safe fallback to full SVD)
-- Fixes device placement by using `.to(tensor.device)` (the original pattern `.to(tensor.device.type)` can be wrong on multi-device setups).
-- Plumbed through optimizers and the benchmark via param-group keys:
-  - `svd_method`, `rsvd_oversample`, `rsvd_n_iter`
+- Implementation: `galore_torch/galore_projector.py`
+- Adds an explicit SVD backend selection:
+  - `svd_method=full`: `torch.linalg.svd`
+  - `svd_method=randomized`: `torch.svd_lowrank`, with fallback to full SVD when unsupported or not beneficial
+- Corrects device placement by using `.to(tensor.device)` (instead of `.to(tensor.device.type)`), which preserves device identity in multi-device settings.
+- The benchmark and optimizers accept projector controls via param-group keys: `svd_method`, `rsvd_oversample`, `rsvd_n_iter`.
 
-### 4) Tests (built-in `unittest`)
+### Tests
 
-- `tests/test_diagnostics.py`: GaLore state < AdamW; projector memory non-zero.
-- `tests/test_projector.py`: randomized SVD works on tall/wide matrices; rank bounds validated.
+- `tests/test_diagnostics.py`: GaLore optimizer state < AdamW; projector memory non-zero.
+- `tests/test_projector.py`: randomized SVD mode shape checks and rank validation.
 
-### 5) Optional dependencies stay optional
+Optional dependencies remain optional:
 
-This fork is more “import-safe” for local use:
+- `bitsandbytes` is only required for `GaLoreAdamW8bit`.
+- `tensorly` is only required for tensor projection (`GaLoreProjectorTensor`, i.e., dim > 2).
 
-- `bitsandbytes` is only needed if you use `GaLoreAdamW8bit`.
-- `tensorly` is only needed if you use tensor projection (`GaLoreProjectorTensor`, i.e., dim > 2).
-
----
-
-## Results (real run on Apple Silicon / MPS)
+## Results (Apple Silicon / MPS, real run)
 
 Published run directory: `reports/published/20260225_184856/`
 
@@ -92,12 +65,13 @@ Repro command (embedded in the report):
 python3 scripts/local_benchmark.py --device auto --output_root reports/published --svd_method full
 ```
 
-Key settings:
-- `device=mps`, `dtype=float32`, `batch_size=4`, `seq_len=128`
-- `warmup_steps=10`, `steps=50`, `trials=3`
-- GaLore targets: `target_modules=attn,mlp`
+Configuration summary:
+- Device: `mps`, dtype: `float32`
+- Batch size: `4`, sequence length: `128`
+- Warm-up steps: `10`, measured steps: `50`, trials: `3`
+- GaLore target selection: `target_modules=attn,mlp`
 - Projector: `proj_type=std`, `svd_method=full`
-- GaLore coverage: `28` Linear modules, `802,816` weights (≈ `8.9%` of model parameters)
+- GaLore coverage: 28 Linear modules; 802,816 weights (≈ 8.9% of model parameters)
 
 | method | rank | target_modules | avg_step_ms | tokens/s | opt_state_MB | projector_MB | peak_mps_MB | avg_loss |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
@@ -107,68 +81,55 @@ Key settings:
 | galore_adamw | 32 | attn,mlp | 36.263 ± 0.316 | 14119.721 ± 122.326 | 64.040 | 0.438 | 231.367 | 10.384 ± 0.000 |
 | galore_adamw | 64 | attn,mlp | 37.632 ± 1.168 | 13614.314 ± 427.385 | 65.571 | 0.875 | 231.571 | 10.388 ± 0.000 |
 
-What this shows (plain English):
+Summary:
 
-- **Optimizer-state memory drops with GaLore.** Example: AdamW `68.634 MB` → GaLore rank 8 `62.892 MB` (≈ **5.7 MB saved**).
-- **Lower rank saves more optimizer-state memory** (rank 8 saves more than rank 64).
-- **Projector overhead is small** here (≈ `0.1–0.9 MB`, increasing with rank).
-- **Throughput is lower** in this benchmark because projector updates add work. This is expected; the point of the harness is to quantify this tradeoff on your own machine.
-- `peak_mps_MB` changes only slightly because total allocated memory also includes model weights/activations; `opt_state_MB` is the more direct measurement of optimizer-state savings.
+- Optimizer-state memory decreases under GaLore (e.g., rank 8: 68.634 → 62.892 MB; −5.742 MB, −8.4%).
+- Lower ranks yield larger optimizer-state reductions; projector memory increases with rank (0.109 → 0.875 MB).
+- Throughput decreases in this configuration due to projection/SVD overhead (rank 8 tokens/s: 17134 → 14394; −16.0%).
+- `peak_mps_MB` is a coarse device-level metric; the optimizer-state measurements (`opt_state_MB`) are the direct signal for GaLore’s intended savings.
 
----
+## How to run (offline)
 
-## Run it locally (offline)
-
-Install only what the benchmark needs:
+Install benchmark dependencies:
 
 ```bash
 python3 -m pip install torch transformers
 ```
 
-Run the default sweep (uses MPS if available, otherwise CPU):
+Default run (auto-selects MPS if available, otherwise CPU):
 
 ```bash
 python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
 ```
 
-Try the new projector option:
+Randomized/low-rank SVD projector:
 
 ```bash
 python3 scripts/local_benchmark.py --device auto --svd_method randomized --rsvd_oversample 8 --rsvd_n_iter 1
 ```
 
-Outputs go to:
-- `reports/runs/<timestamp>/report.md`
-- `reports/runs/<timestamp>/results.json`
-- `reports/runs/<timestamp>/run_config.json`
-
-If you want to commit results, use:
+To publish results into version-controlled directories:
 
 ```bash
 python3 scripts/local_benchmark.py --device auto --output_root reports/published
 ```
 
-For a deeper explanation of the benchmark internals, see `README_LOCAL_BENCHMARK.md`.
+See `README_LOCAL_BENCHMARK.md` for benchmark internals and metric definitions.
 
----
+## Tests
 
-## Conclusion
+```bash
+python3 -m unittest -q
+```
 
-This fork makes GaLore measurable and reproducible on a laptop (offline) and adds a real GaLore-side improvement: a configurable projector SVD method (`full` vs `randomized`) plus safer device placement.
+## Future work
 
----
-
-## Future work (good next “real” additions)
-
-- Add an automatic **A/B comparison** in the report: `svd_method=full` vs `randomized` on the same run.
-- Add a `scripts/plot_results.py` that generates a single plot (rank vs memory/speed).
-- Add a slightly larger local model config (e.g., ~50–100M params) to make optimizer-state deltas more obvious.
-- Add an optional “real data” mode (still small) to track loss curves, while keeping the default fully offline.
-- Explore adaptive rank / per-layer rank schedules based on layer shape or gradient statistics.
-
----
+- Add an explicit A/B comparison report for `svd_method=full` vs `svd_method=randomized` under identical settings.
+- Add plotting utilities from `results.json` (rank vs memory/throughput).
+- Add additional offline model configurations (e.g., 50–100M parameters) to increase measurement sensitivity while remaining laptop-friendly.
+- Explore per-layer rank selection policies.
 
 ## Attribution
 
-- Original repo: [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore)
+- Original repository: [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore)
 - Paper: [GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507)
