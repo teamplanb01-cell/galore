@@ -1,21 +1,13 @@
-# GaLore (Portfolio fork)
+# GaLore
 
-> Portfolio fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) with an **offline local benchmark**, **memory diagnostics**, and **tests** so you can study GaLore on a laptop (CPU/MPS/CUDA).
+> Fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) with an **offline local benchmark**, **memory diagnostics**, and **tests** to study GaLore on a laptop (CPU/MPS/CUDA).
 
-## What’s new in this fork
+## Additions in this fork
 
 - **Offline benchmark runner:** `scripts/local_benchmark.py` (synthetic tokens + tiny LLaMA config; compares AdamW vs GaLoreAdamW across ranks).
 - **Memory diagnostics utilities:** `galore_torch/diagnostics.py` (model param bytes, optimizer-state bytes, GaLore projector bytes).
 - **Minimal tests:** `tests/test_diagnostics.py` (built-in `unittest`; verifies GaLore state < AdamW and projector memory > 0).
 - **Optional deps are import-safe:** `bitsandbytes` / `tensorly` are no longer required just to `import galore_torch` (only needed for 8-bit or tensor projection features).
-
-## Employer pitch (what this fork demonstrates)
-
-- I turned research code into a **reproducible, offline benchmark** that runs on a laptop and generates a portfolio-ready `report.md` + `results.json`.
-- I added **memory accounting** (optimizer-state bytes + GaLore projector bytes) so comparisons are quantitative, not anecdotal.
-- I improved **developer ergonomics and robustness** by making optional dependencies import-safe with clear error messages when features require extra packages.
-- I added **unit tests** around the key invariants (GaLore optimizer state < AdamW; projector memory is allocated) so changes stay correct over time.
-- I documented the workflow clearly (main README + `README_LOCAL_BENCHMARK.md`) to make the repo easy for others to run and review.
 
 ## Quickstart: run the offline benchmark (no internet)
 

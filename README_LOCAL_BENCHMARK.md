@@ -1,4 +1,4 @@
-# Local GaLore Benchmark (Offline, Portfolio-Friendly)
+# Local GaLore Benchmark (Offline)
 
 This repo includes a self-contained benchmark harness you can run on your laptop (CPU/MPS/CUDA) to compare **baseline AdamW** vs **GaLoreAdamW** on a tiny LLaMA config **without downloading any datasets**.
 
@@ -59,7 +59,7 @@ For each run (AdamW baseline + each GaLore rank), the script records:
 
 Timing uses `torch.mps.synchronize()` / `torch.cuda.synchronize()` when applicable so measurements reflect real device execution.
 
-## Recommended portfolio runs
+## Recommended runs
 
 Default sweep (quick and employer-friendly):
 
@@ -92,4 +92,3 @@ python3 -m unittest -q
 - If `--device auto` picks CPU on Apple Silicon, verify MPS support in your environment:
   - `python3 -c "import torch; print(torch.backends.mps.is_available())"`
 - If the benchmark is slow, reduce `--steps`, `--seq_len`, or `--batch_size`.
-
