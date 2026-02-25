@@ -1,0 +1,34 @@
+{
+  "batch_size": 2,
+  "device": "cpu",
+  "dtype": "float32",
+  "galore_scale": 1.0,
+  "lr": 0.001,
+  "model_config": "configs/llama_9m.json",
+  "model_param_bytes": 35983872,
+  "model_total_params": 8995968,
+  "platform": "macOS-15.5-arm64-arm-64bit-Mach-O",
+  "proj_type": "std",
+  "python_version": "3.13.9 (v3.13.9:8183fa5e3f7, Oct 14 2025, 10:27:13) [Clang 16.0.0 (clang-1600.0.26.6)]",
+  "ranks": [
+    8,
+    16,
+    32,
+    64
+  ],
+  "repro_command": "python3 /Users/sakshamkapoor/Downloads/GaLore-master/scripts/local_benchmark.py --device cpu --dtype float32 --batch_size 2 --seq_len 128 --warmup_steps 10 --steps 50 --ranks 8 16 32 64 --trials 3 --output_root reports/published",
+  "seed": 42,
+  "seq_len": 128,
+  "steps": 50,
+  "target_modules": [
+    "attn",
+    "mlp"
+  ],
+  "timestamp": "20260225_154524",
+  "torch_version": "2.9.1",
+  "transformers_version": "4.57.6",
+  "trials": 3,
+  "update_proj_gap": 10,
+  "warmup_steps": 10,
+  "weight_decay": 0.0
+}

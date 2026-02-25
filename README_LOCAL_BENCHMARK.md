@@ -24,6 +24,8 @@ From the repo root:
 python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
 ```
 
+By default the script runs **3 trials** per method; use `--trials 1` for a quick smoke test.
+
 Outputs are written to:
 
 `reports/runs/<timestamp>/report.md`  
@@ -56,6 +58,8 @@ For each run (AdamW baseline + each GaLore rank), the script records:
   - CUDA: `torch.cuda.max_memory_allocated()` (tracked max)
   - CPU: optional RSS via `psutil` if installed
 - Loss: `avg_loss`, `final_loss`
+
+When `--trials > 1`, the report table shows **mean ± std** for timing/throughput (and aggregates memory metrics).
 
 Timing uses `torch.mps.synchronize()` / `torch.cuda.synchronize()` when applicable so measurements reflect real device execution.
 

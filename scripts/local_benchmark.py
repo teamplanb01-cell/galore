@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import shlex
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -37,6 +38,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--seq_len", type=int, default=128)
     parser.add_argument("--warmup_steps", type=int, default=10)
     parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--trials", type=int, default=3, help="Repeat each run N times and aggregate results.")
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -162,21 +164,91 @@ def _generate_repeat_biased_tokens(
     return tokens
 
 
-def _collect_galore_params(model: torch.nn.Module, target_modules: list[str]) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+def _collect_galore_params(
+    model: torch.nn.Module, target_modules: list[str]
+) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter], list[str]]:
     from torch import nn
 
     galore_params: list[torch.nn.Parameter] = []
+    galore_module_names: list[str] = []
     for module_name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
             continue
         if not any(key in module_name for key in target_modules):
             continue
         galore_params.append(module.weight)
+        galore_module_names.append(module_name)
 
     id_galore_params = {id(p) for p in galore_params}
     regular_params = [p for p in model.parameters() if p.requires_grad and id(p) not in id_galore_params]
     galore_params = [p for p in galore_params if p.requires_grad]
-    return galore_params, regular_params
+    return galore_params, regular_params, galore_module_names
+
+
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    if not values:
+        return float("nan"), float("nan")
+    if len(values) == 1:
+        return float(values[0]), 0.0
+    mean = float(statistics.fmean(values))
+    std = float(statistics.stdev(values))
+    return mean, std
+
+
+def _aggregate_trials(trial_results: list[dict]) -> dict:
+    if not trial_results:
+        raise ValueError("trial_results must be non-empty")
+
+    first = trial_results[0]
+    method = first["method"]
+    rank = first["rank"]
+    targets = first.get("target_modules", "")
+
+    avg_step_mean, avg_step_std = _mean_std([float(r["avg_step_time_ms"]) for r in trial_results])
+    tokens_mean, tokens_std = _mean_std([float(r["tokens_per_sec"]) for r in trial_results])
+    avg_loss_mean, avg_loss_std = _mean_std([float(r["avg_loss"]) for r in trial_results])
+    final_loss_mean, final_loss_std = _mean_std([float(r["final_loss"]) for r in trial_results])
+
+    opt_state_mb = float(statistics.fmean([float(r["optimizer_state_mb"]) for r in trial_results]))
+    projector_mb = float(statistics.fmean([float(r["galore_projector_mb"]) for r in trial_results]))
+
+    peak_mps_mb = max(float(r["peak_mps_mb"]) for r in trial_results)
+    peak_cuda_mb = max(float(r["peak_cuda_mb"]) for r in trial_results)
+
+    peak_rss_vals = [r.get("peak_rss_mb") for r in trial_results if r.get("peak_rss_mb") is not None]
+    peak_rss_mb = max((float(v) for v in peak_rss_vals), default=None)
+
+    summary = {
+        "method": method,
+        "rank": rank,
+        "target_modules": targets,
+        "trials": len(trial_results),
+        "steps": int(first["steps"]),
+        "warmup_steps": int(first["warmup_steps"]),
+        "avg_step_time_ms": avg_step_mean,
+        "avg_step_time_ms_std": avg_step_std,
+        "tokens_per_sec": tokens_mean,
+        "tokens_per_sec_std": tokens_std,
+        "optimizer_state_mb": opt_state_mb,
+        "galore_projector_mb": projector_mb,
+        "peak_mps_mb": peak_mps_mb,
+        "peak_cuda_mb": peak_cuda_mb,
+        "peak_rss_mb": peak_rss_mb,
+        "avg_loss": avg_loss_mean,
+        "avg_loss_std": avg_loss_std,
+        "final_loss": final_loss_mean,
+        "final_loss_std": final_loss_std,
+    }
+
+    for k in [
+        "galore_linear_modules_count",
+        "galore_params_numel",
+        "galore_params_fraction",
+    ]:
+        if k in first:
+            summary[k] = first[k]
+
+    return summary
 
 
 def _run_training(
@@ -209,10 +281,13 @@ def _run_training(
 
     if method == "adamw":
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        galore_module_names: list[str] = []
+        galore_params_numel = 0
     elif method == "galore_adamw":
         if rank is None:
             raise ValueError("rank must be provided for galore_adamw")
-        galore_params, regular_params = _collect_galore_params(model, target_modules)
+        galore_params, regular_params, galore_module_names = _collect_galore_params(model, target_modules)
+        galore_params_numel = int(sum(p.numel() for p in galore_params))
         param_groups = [
             {"params": regular_params},
             {
@@ -282,6 +357,9 @@ def _run_training(
         "method": method,
         "rank": rank,
         "target_modules": ",".join(target_modules) if method == "galore_adamw" else "",
+        "galore_linear_modules_count": len(galore_module_names) if method == "galore_adamw" else 0,
+        "galore_params_numel": galore_params_numel if method == "galore_adamw" else 0,
+        "galore_params_fraction": (galore_params_numel / sum(p.numel() for p in model.parameters())) if method == "galore_adamw" else 0.0,
         "steps": steps,
         "warmup_steps": warmup_steps,
         "avg_step_time_ms": avg_step_ms,
@@ -327,6 +405,7 @@ def _render_report_md(*, run_config: dict, results: list[dict]) -> str:
     lines.append(f"- Python: `{run_config['python_version']}`")
     lines.append(f"- Platform: `{run_config['platform']}`")
     lines.append(f"- Model params: `{model_params:,}` ({format_bytes(model_param_bytes)})")
+    lines.append(f"- Trials per run: `{run_config['trials']}`")
     lines.append("")
     lines.append("## Repro command")
     lines.append("")
@@ -346,16 +425,24 @@ def _render_report_md(*, run_config: dict, results: list[dict]) -> str:
             return "-"
         return f"{x:.3f}"
 
+    def _fmt_pm(mean: float, std: float) -> str:
+        if mean != mean or std != std:
+            return "-"
+        if std == 0.0:
+            return f"{mean:.3f}"
+        return f"{mean:.3f} ± {std:.3f}"
+
     for r in results:
         method = r["method"]
         rank = r["rank"] if r["rank"] is not None else "-"
         targets = r["target_modules"] or "-"
         lines.append(
             f"| {method} | {rank} | {targets} | "
-            f"{_fmt(r['avg_step_time_ms'])} | {_fmt(r['tokens_per_sec'])} | "
+            f"{_fmt_pm(r['avg_step_time_ms'], r.get('avg_step_time_ms_std', 0.0))} | "
+            f"{_fmt_pm(r['tokens_per_sec'], r.get('tokens_per_sec_std', 0.0))} | "
             f"{_fmt(r['optimizer_state_mb'])} | {_fmt(r['galore_projector_mb'] if method == 'galore_adamw' else None)} | "
             f"{_fmt(r['peak_mps_mb'] if device.startswith('mps') else None)} | "
-            f"{_fmt(r['avg_loss'])} |"
+            f"{_fmt_pm(r['avg_loss'], r.get('avg_loss_std', 0.0))} |"
         )
 
     lines.append("")
@@ -387,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
 
     device = _pick_device(args.device)
     dtype = _pick_dtype(args.dtype)
+
+    if args.trials <= 0:
+        raise ValueError("--trials must be >= 1")
 
     timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = _unique_run_dir(Path(args.output_root), timestamp)
@@ -430,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         "seq_len": args.seq_len,
         "warmup_steps": args.warmup_steps,
         "steps": args.steps,
+        "trials": args.trials,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "ranks": args.ranks,
@@ -442,31 +533,12 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
 
-    results.append(
-        _run_training(
-            method="adamw",
-            rank=None,
-            config=config,
-            base_state_dict=base_state_dict,
-            batches_cpu=batches_cpu,
-            device=device,
-            dtype=dtype,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            update_proj_gap=args.update_proj_gap,
-            galore_scale=args.galore_scale,
-            proj_type=args.proj_type,
-            target_modules=target_modules,
-            warmup_steps=args.warmup_steps,
-            steps=args.steps,
-        )
-    )
-
-    for rank in args.ranks:
-        results.append(
+    adamw_trials: list[dict] = []
+    for _ in range(args.trials):
+        adamw_trials.append(
             _run_training(
-                method="galore_adamw",
-                rank=int(rank),
+                method="adamw",
+                rank=None,
                 config=config,
                 base_state_dict=base_state_dict,
                 batches_cpu=batches_cpu,
@@ -482,6 +554,31 @@ def main(argv: list[str] | None = None) -> int:
                 steps=args.steps,
             )
         )
+    results.append({**_aggregate_trials(adamw_trials), "trial_results": adamw_trials})
+
+    for rank in args.ranks:
+        galore_trials: list[dict] = []
+        for _ in range(args.trials):
+            galore_trials.append(
+                _run_training(
+                    method="galore_adamw",
+                    rank=int(rank),
+                    config=config,
+                    base_state_dict=base_state_dict,
+                    batches_cpu=batches_cpu,
+                    device=device,
+                    dtype=dtype,
+                    lr=args.lr,
+                    weight_decay=args.weight_decay,
+                    update_proj_gap=args.update_proj_gap,
+                    galore_scale=args.galore_scale,
+                    proj_type=args.proj_type,
+                    target_modules=target_modules,
+                    warmup_steps=args.warmup_steps,
+                    steps=args.steps,
+                )
+            )
+        results.append({**_aggregate_trials(galore_trials), "trial_results": galore_trials})
 
     payload = {"run_config": run_config, "results": results}
     (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2, sort_keys=True) + "\n")

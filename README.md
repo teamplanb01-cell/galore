@@ -61,11 +61,15 @@ Run (uses **MPS** if available, otherwise CPU):
 python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
 ```
 
+By default the script runs **3 trials** per method; use `--trials 1` for a quick smoke test.
+
 Outputs:
 
 - `reports/runs/<timestamp>/report.md` (human-readable)
 - `reports/runs/<timestamp>/results.json` (all numbers)
 - `reports/runs/<timestamp>/run_config.json` (exact settings + versions)
+
+If you want to **commit/publish** a run to GitHub, set `--output_root reports/published` (this is not ignored by `.gitignore`).
 
 Tip: if you want to confirm MPS is available:
 
@@ -73,17 +77,22 @@ Tip: if you want to confirm MPS is available:
 python3 -c "import torch; print('mps available:', torch.backends.mps.is_available())"
 ```
 
-## Results (example)
+## Results (published run)
 
-Below is an example from a short CPU sanity-check run (very few measured steps). Your exact numbers will vary by machine.
+The table below is from an actual run committed to this repo:
 
-| method | rank | avg_step_ms | optimizer_state_mb | galore_projector_mb |
-|---|---:|---:|---:|---:|
-| adamw | - | 25.235 | 68.634 | - |
-| galore_adamw | 8 | 23.500 | 62.892 | 0.109 |
-| galore_adamw | 16 | 23.930 | 63.274 | 0.219 |
-| galore_adamw | 32 | 22.257 | 64.040 | 0.438 |
-| galore_adamw | 64 | 23.140 | 65.571 | 0.875 |
+- Report: `reports/published/20260225_154524/report.md`
+- Raw results: `reports/published/20260225_154524/results.json`
+- Repro command is embedded in the report.
+- Settings: `device=cpu`, `dtype=float32`, `batch_size=2`, `seq_len=128`, `warmup_steps=10`, `steps=50`, `trials=3`, `ranks=8 16 32 64`, `target_modules=attn,mlp`
+
+| method | rank | avg_step_ms (mean ± std) | tokens/s (mean ± std) | optimizer_state_mb | projector_mb |
+|---|---:|---:|---:|---:|---:|
+| adamw | - | 33.621 ± 2.225 | 7635.762 ± 487.126 | 68.634 | - |
+| galore_adamw | 8 | 35.505 ± 1.200 | 7215.871 ± 246.003 | 62.892 | 0.109 |
+| galore_adamw | 16 | 34.624 ± 0.265 | 7394.014 ± 56.706 | 63.274 | 0.219 |
+| galore_adamw | 32 | 34.976 ± 0.438 | 7319.976 ± 91.350 | 64.040 | 0.438 |
+| galore_adamw | 64 | 35.194 ± 0.559 | 7275.141 ± 115.961 | 65.571 | 0.875 |
 
 How to read this:
 
@@ -91,7 +100,13 @@ How to read this:
 - **Smaller rank → less optimizer memory** (that’s the main knob GaLore gives you).
 - The projector itself uses some memory (`galore_projector_mb`), and it grows with rank.
 
-For more stable timing comparisons, run longer (defaults are already reasonable):
+Quick takeaways for this run:
+
+- Optimizer-state memory saved vs AdamW: ~**3.1–5.7 MB** (depending on rank).
+- Projector memory overhead: ~**0.1–0.9 MB** (grows with rank).
+- Step time: GaLore was slightly slower on CPU here (~**3–6%** depending on rank).
+
+For your own machine, rerun the benchmark and compare results (defaults are already reasonable):
 
 ```bash
 python3 scripts/local_benchmark.py --device auto --steps 50 --warmup_steps 10
@@ -100,14 +115,17 @@ python3 scripts/local_benchmark.py --device auto --steps 50 --warmup_steps 10
 ## Common tweaks
 
 ```bash
-# Faster run
-python3 scripts/local_benchmark.py --device cpu --batch_size 2 --seq_len 64 --warmup_steps 2 --steps 10 --ranks 8 16
+# Faster run (1 trial)
+python3 scripts/local_benchmark.py --device cpu --trials 1 --batch_size 2 --seq_len 64 --warmup_steps 2 --steps 10 --ranks 8 16
 
 # Change which Linear layers get GaLore (substring match on module name)
 python3 scripts/local_benchmark.py --target_modules attn,mlp
 
 # Projection hyperparameters
 python3 scripts/local_benchmark.py --update_proj_gap 10 --galore_scale 1.0 --proj_type std
+
+# Save results somewhere you can commit/publish
+python3 scripts/local_benchmark.py --output_root reports/published
 ```
 
 ## Tests
@@ -127,4 +145,3 @@ Not required for the offline benchmark:
 
 - Original repo: [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore)
 - Paper: [GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507)
-
