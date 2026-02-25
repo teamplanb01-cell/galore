@@ -1,4 +1,53 @@
-# GaLore
+# GaLore (Portfolio fork)
+
+> Portfolio fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) with an **offline local benchmark**, **memory diagnostics**, and **tests** so you can study GaLore on a laptop (CPU/MPS/CUDA).
+
+## What’s new in this fork
+
+- **Offline benchmark runner:** `scripts/local_benchmark.py` (synthetic tokens + tiny LLaMA config; compares AdamW vs GaLoreAdamW across ranks).
+- **Memory diagnostics utilities:** `galore_torch/diagnostics.py` (model param bytes, optimizer-state bytes, GaLore projector bytes).
+- **Minimal tests:** `tests/test_diagnostics.py` (built-in `unittest`; verifies GaLore state < AdamW and projector memory > 0).
+- **Optional deps are import-safe:** `bitsandbytes` / `tensorly` are no longer required just to `import galore_torch` (only needed for 8-bit or tensor projection features).
+
+## Employer pitch (what this fork demonstrates)
+
+- I turned research code into a **reproducible, offline benchmark** that runs on a laptop and generates a portfolio-ready `report.md` + `results.json`.
+- I added **memory accounting** (optimizer-state bytes + GaLore projector bytes) so comparisons are quantitative, not anecdotal.
+- I improved **developer ergonomics and robustness** by making optional dependencies import-safe with clear error messages when features require extra packages.
+- I added **unit tests** around the key invariants (GaLore optimizer state < AdamW; projector memory is allocated) so changes stay correct over time.
+- I documented the workflow clearly (main README + `README_LOCAL_BENCHMARK.md`) to make the repo easy for others to run and review.
+
+## Quickstart: run the offline benchmark (no internet)
+
+The benchmark does **not** download datasets or models. It builds a tiny LLaMA from a local config and trains on synthetic tokens.
+
+```bash
+# minimal deps for the benchmark
+python3 -m pip install torch transformers
+
+python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
+```
+
+Outputs are written to `reports/runs/<timestamp>/report.md` (plus `results.json` and `run_config.json`).
+See `README_LOCAL_BENCHMARK.md` for details on metrics, interpretation, and suggested runs.
+
+## Example result (short CPU run)
+
+Below is an example from a short run (`--batch_size 2 --seq_len 32 --warmup_steps 1 --steps 2`), showing the expected trend: **lower rank → smaller optimizer state**.
+
+| method | rank | target_modules | avg_step_ms | opt_state_MB | projector_MB |
+|---|---:|---|---:|---:|---:|
+| adamw | - | - | 25.235 | 68.634 | - |
+| galore_adamw | 8 | attn,mlp | 23.500 | 62.892 | 0.109 |
+| galore_adamw | 16 | attn,mlp | 23.930 | 63.274 | 0.219 |
+| galore_adamw | 32 | attn,mlp | 22.257 | 64.040 | 0.438 |
+| galore_adamw | 64 | attn,mlp | 23.140 | 65.571 | 0.875 |
+
+## Tests
+
+```bash
+python3 -m unittest -q
+```
 
 This repo contains the pre-release version of GaLore algorithm, proposed by [GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507).
 
