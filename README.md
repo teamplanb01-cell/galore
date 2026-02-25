@@ -1,29 +1,26 @@
-# GaLore (Fork) — Offline Benchmark + Diagnostics
+# GaLore (Fork): Offline Benchmark + Diagnostics
 
-This fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) adds a **self-contained, offline** way to study GaLore locally: a reproducible benchmark script, memory accounting utilities, and minimal tests.
+This fork of [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore) adds a **clean, offline workflow** to study GaLore locally: a reproducible benchmark script, memory diagnostics, and minimal tests.
 
-## What’s included
+## Method
 
-- **Offline benchmark runner:** `scripts/local_benchmark.py`
-  - Builds a tiny LLaMA from a local config (default: `configs/llama_9m.json`)
-  - Trains on **synthetic tokens** (no downloads)
-  - Compares **AdamW** vs **GaLoreAdamW** across a rank sweep (default ranks: `8 16 32 64`)
-  - Writes a Markdown report + JSON results
-- **Diagnostics utilities:** `galore_torch/diagnostics.py`
-  - `model_param_nbytes(model)`
-  - `optimizer_state_tensor_nbytes(optimizer)`
-  - `galore_projector_nbytes(optimizer)`
-- **Tests:** `tests/test_diagnostics.py` (built-in `unittest`)
+The benchmark (`scripts/local_benchmark.py`) trains a tiny causal LM for a few steps and reports timing + memory:
 
-## Quickstart (no internet)
+- **Model:** `AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(<local_json>))` (default: `configs/llama_9m.json`)
+- **Data:** repeat-biased **synthetic tokens** generated offline (no dataset/model downloads)
+- **Runs:** baseline **AdamW** vs **GaLoreAdamW** across a rank sweep (default: `8 16 32 64`)
+- **GaLore targets:** apply GaLore to `nn.Linear.weight` where module name contains any of `--target_modules` (default: `attn,mlp`)
+- **Key metrics:** `avg_step_time_ms`, `tokens_per_sec`, `optimizer_state_mb`, `galore_projector_mb`, peak device memory (MPS/CUDA; optional CPU RSS)
 
-Install minimal dependencies for the benchmark:
+## Run
+
+Install minimal deps:
 
 ```bash
 python3 -m pip install torch transformers
 ```
 
-Run the benchmark (uses MPS if available, otherwise CPU):
+Run (uses MPS if available, otherwise CPU):
 
 ```bash
 python3 scripts/local_benchmark.py --device auto --model_config configs/llama_9m.json
@@ -35,30 +32,34 @@ Outputs:
 - `reports/runs/<timestamp>/results.json`
 - `reports/runs/<timestamp>/run_config.json`
 
-## Benchmark options (most useful flags)
+More details: `README_LOCAL_BENCHMARK.md`.
 
-```bash
-# smaller/faster run
-python3 scripts/local_benchmark.py --device cpu --batch_size 2 --seq_len 64 --warmup_steps 2 --steps 10 --ranks 8 16
+## Results (example)
 
-# change which Linear layers get GaLore (substring match on module name)
-python3 scripts/local_benchmark.py --target_modules attn,mlp
+Example from a short CPU run (command: `--batch_size 2 --seq_len 32 --warmup_steps 1 --steps 2 --ranks 8 16 32 64`, targets: `attn,mlp`):
 
-# change projection hyperparams
-python3 scripts/local_benchmark.py --update_proj_gap 10 --galore_scale 1.0 --proj_type std
-```
+| method | rank | avg_step_ms | opt_state_MB | projector_MB |
+|---|---:|---:|---:|---:|
+| adamw | - | 25.235 | 68.634 | - |
+| galore_adamw | 8 | 23.500 | 62.892 | 0.109 |
+| galore_adamw | 16 | 23.930 | 63.274 | 0.219 |
+| galore_adamw | 32 | 22.257 | 64.040 | 0.438 |
+| galore_adamw | 64 | 23.140 | 65.571 | 0.875 |
 
-## What the report measures
+Notes:
+- This is a pipeline sanity-check run (2 measured steps). Use the defaults (`--steps 50`) for more stable timing.
+- Expected trend: **lower rank → lower optimizer state**, while projector memory grows with rank.
 
-Per run (baseline AdamW + each GaLore rank), the benchmark records:
+## Conclusion
 
-- Timing: `avg_step_time_ms`, `p50_step_time_ms`, `p90_step_time_ms`
-- Throughput: `tokens_per_sec`
-- Memory:
-  - `optimizer_state_mb` (tensor storage inside `optimizer.state`)
-  - `galore_projector_mb` (tensor storage under `projector.ortho_matrix`, GaLore only)
-  - Peak device memory (MPS/CUDA) + optional CPU RSS (if `psutil` is installed)
-- Loss: `avg_loss`, `final_loss`
+- This fork makes GaLore easy to **evaluate locally** with reproducible reports.
+- The benchmark quantifies the tradeoffs between **rank**, **optimizer-state memory**, **projector overhead**, and **step time**.
+
+## Where the additions live
+
+- Benchmark runner: `scripts/local_benchmark.py`
+- Diagnostics: `galore_torch/diagnostics.py`
+- Tests: `tests/test_diagnostics.py`
 
 ## Tests
 
@@ -68,12 +69,12 @@ python3 -m unittest -q
 
 ## Optional dependencies
 
-These are **not required** for the offline benchmark:
-
-- `bitsandbytes`: only needed for `GaLoreAdamW8bit`
-- `tensorly`: only needed for tensor projection (`GaLoreProjectorTensor`, i.e., dim > 2)
+Not required for the offline benchmark:
+- `bitsandbytes` (only for `GaLoreAdamW8bit`)
+- `tensorly` (only for tensor projection via `GaLoreProjectorTensor`, i.e., dim > 2)
 
 ## Attribution
 
-- Original project: [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore)
+- Original repo: [jiaweizzhao/GaLore](https://github.com/jiaweizzhao/GaLore)
 - Paper: [GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507)
+
